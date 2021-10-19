@@ -1,23 +1,16 @@
-import abc
 import copy
-import struct
 import ujson
 import mmh3
 
+from . import blob
+from .configs import DefaultConfigs
 from .exceptions import ParamError
 from .check import check_pass_param
+from .types import DataType, PlaceholderType, DeployMode
 
-from ..grpc_gen import milvus_pb2 as grpc_types
-
-# for milvus-distributed
 from ..grpc_gen import common_pb2 as common_types
 from ..grpc_gen import schema_pb2 as schema_types
 from ..grpc_gen import milvus_pb2 as milvus_types
-
-from . import blob
-from .configs import DefaultConfigs
-
-from .types import RangeType, DataType, MetricType, IndexType, PlaceholderType, DeployMode
 
 
 class Prepare:
@@ -45,7 +38,6 @@ class Prepare:
 
         if "fields" not in fields:
             raise ParamError("Param fields must contains key 'fields'")
-
 
         schema = schema_types.CollectionSchema(name=collection_name)
 
@@ -126,7 +118,7 @@ class Prepare:
                 schema.fields.append(field_schema)
 
         return milvus_types.CreateCollectionRequest(collection_name=collection_name,
-                                                    schema=bytes(schema.SerializeToString()), shards_num = shards_num)
+                                                    schema=bytes(schema.SerializeToString()), shards_num=shards_num)
 
     @classmethod
     def drop_collection_request(cls, collection_name):
@@ -367,19 +359,21 @@ class Prepare:
 
     @classmethod
     def delete_request(cls, collection_name, partition_name, expr):
-        def check_str(input, prefix):
-            if (input == None):
+        def check_str(instr, prefix):
+            if instr is None:
                 raise ParamError(prefix + " cannot be None")
-            if (input == None) or (not isinstance(input, str)):
+            if not isinstance(instr, str):
                 msg = prefix + " value {} is illegal"
-                raise ParamError(msg.format(input))
+                raise ParamError(msg.format(instr))
+            if instr == "":
+                raise ParamError(prefix + " cannot be empty")
 
         check_str(collection_name, "collection_name")
         check_str(expr, "expr")
 
-        default_partition_name = "_default"  # should here?
-        partition_name = partition_name or default_partition_name
-        request = milvus_types.DeleteRequest(collection_name=collection_name, expr = expr, partition_name=partition_name)
+        # if partition_name is null or empty, delete action will apply to whole collection
+        partition_name = partition_name or ""
+        request = milvus_types.DeleteRequest(collection_name=collection_name, expr=expr, partition_name=partition_name)
         return request
 
     @classmethod
@@ -402,7 +396,8 @@ class Prepare:
         return pls
 
     @classmethod
-    def divide_search_request(cls, collection_name, query_entities, partition_names=None, fields=None, **kwargs):
+    def divide_search_request(cls, collection_name, query_entities, partition_names=None, fields=None, round_decimal=1,
+                              **kwargs):
         schema = kwargs.get("schema", None)
         fields_schema = schema.get("fields", None)  # list
         fields_name_locs = {fields_schema[loc]["name"]: loc
@@ -416,7 +411,8 @@ class Prepare:
         vector_names = dict()
 
         meta = {}   # TODO: ugly here, find a better method
-        def extract_vectors_param(param, placeholders, meta=None, names=None):
+
+        def extract_vectors_param(param, placeholders, meta=None, names=None, round_decimal=-1):
             if not isinstance(param, (dict, list)):
                 return
 
@@ -443,18 +439,18 @@ class Prepare:
                         placeholders[ph] = pv["query"]
                         names[ph] = pk
                         param["vector"][pk]["query"] = ph
+                        param["vector"][pk]["round_decimal"] = round_decimal
 
                     return
                 else:
                     for _, v in param.items():
-                        extract_vectors_param(v, placeholders, meta, names)
+                        extract_vectors_param(v, placeholders, meta, names, round_decimal)
 
             if isinstance(param, list):
                 for item in param:
-                    extract_vectors_param(item, placeholders, meta, names)
+                    extract_vectors_param(item, placeholders, meta, names, round_decimal)
 
-        extract_vectors_param(duplicated_entities, vector_placeholders, meta, vector_names)
-
+        extract_vectors_param(duplicated_entities, vector_placeholders, meta, vector_names, round_decimal)
         if len(vector_placeholders) > 1:
             raise ParamError("query on two vector field is not supported now!")
 
@@ -497,6 +493,7 @@ class Prepare:
                     collection_name=collection_name,
                     partition_names=partition_names,
                     output_fields=fields,
+                    guarantee_timestamp=kwargs.get("guarantee_timestamp", 0),
                 )
                 request.dsl = ujson.dumps(duplicated_entities)
                 request.placeholder_group = plg_str
@@ -505,7 +502,7 @@ class Prepare:
             return requests
 
     @classmethod
-    def search_request(cls, collection_name, query_entities, partition_names=None, fields=None, **kwargs):
+    def search_request(cls, collection_name, query_entities, partition_names=None, fields=None, round_decimal=-1, **kwargs):
         schema = kwargs.get("schema", None)
         fields_schema = schema.get("fields", None)  # list
         fields_name_locs = {fields_schema[loc]["name"]: loc
@@ -521,13 +518,14 @@ class Prepare:
             collection_name=collection_name,
             partition_names=partition_names,
             output_fields=fields,
+            guarantee_timestamp=kwargs.get("guarantee_timestamp", 0),
         )
 
         duplicated_entities = copy.deepcopy(query_entities)
         vector_placeholders = dict()
         vector_names = dict()
 
-        def extract_vectors_param(param, placeholders, names):
+        def extract_vectors_param(param, placeholders, names, round_decimal):
             if not isinstance(param, (dict, list)):
                 return
 
@@ -542,17 +540,18 @@ class Prepare:
                         placeholders[ph] = pv["query"]
                         names[ph] = pk
                         param["vector"][pk]["query"] = ph
+                        param["vector"][pk]["round_decimal"] = round_decimal
 
                     return
                 else:
                     for _, v in param.items():
-                        extract_vectors_param(v, placeholders, names)
+                        extract_vectors_param(v, placeholders, names, round_decimal)
 
             if isinstance(param, list):
                 for item in param:
-                    extract_vectors_param(item, placeholders, names)
+                    extract_vectors_param(item, placeholders, names, round_decimal)
 
-        extract_vectors_param(duplicated_entities, vector_placeholders, vector_names)
+        extract_vectors_param(duplicated_entities, vector_placeholders, vector_names, round_decimal)
         request.dsl = ujson.dumps(duplicated_entities)
 
         plg = milvus_types.PlaceholderGroup()
@@ -587,7 +586,8 @@ class Prepare:
         return request
 
     @classmethod
-    def search_requests_with_expr(cls, collection_name, data, anns_field, param, limit, expr=None, partition_names=None, output_fields=None, **kwargs):
+    def search_requests_with_expr(cls, collection_name, data, anns_field, param, limit, expr=None, partition_names=None,
+                                  output_fields=None, round_decimal=-1, **kwargs):
         schema = kwargs.get("schema", None)
         fields_schema = schema.get("fields", None)  # list
         fields_name_locs = {fields_schema[loc]["name"]: loc
@@ -627,7 +627,7 @@ class Prepare:
         params = param_copy.pop("params", {})
         if not isinstance(params, dict):
             raise ParamError("Search params must be a dict")
-        search_params = {"anns_field": anns_field, "topk": limit, "metric_type": metric_type, "params": params}
+        search_params = {"anns_field": anns_field, "topk": limit, "metric_type": metric_type, "params": params, "round_decimal": round_decimal}
 
         def dump(v):
             if isinstance(v, dict):
@@ -642,6 +642,7 @@ class Prepare:
                 collection_name=collection_name,
                 partition_names=partition_names,
                 output_fields=output_fields,
+                guarantee_timestamp=kwargs.get("guarantee_timestamp", 0),
             )
             request.placeholder_group = plg_str
 
@@ -722,7 +723,7 @@ class Prepare:
     @classmethod
     def release_partitions(cls, db_name, collection_name, partition_names):
         return milvus_types.ReleasePartitionsRequest(db_name=db_name, collection_name=collection_name,
-                                                    partition_names=partition_names)
+                                                     partition_names=partition_names)
 
     @classmethod
     def get_collection_stats_request(cls, collection_name):
@@ -773,11 +774,11 @@ class Prepare:
                                          )
 
     @classmethod
-    def calc_distance_request(cls,  vectors_left, vectors_right, params):
-        if vectors_left == None or not isinstance(vectors_left, dict):
+    def calc_distance_request(cls, vectors_left, vectors_right, params):
+        if vectors_left is None or not isinstance(vectors_left, dict):
             raise ParamError("vectors_left value {} is illegal".format(vectors_left))
 
-        if vectors_right == None or not isinstance(vectors_right, dict):
+        if vectors_right is None or not isinstance(vectors_right, dict):
             raise ParamError("vectors_right value {} is illegal".format(vectors_right))
 
         def precheck_params(p):
@@ -793,11 +794,12 @@ class Prepare:
 
         request = milvus_types.CalcDistanceRequest()
         request.params.extend([common_types.KeyValuePair(key=str(key), value=str(value))
-                                      for key, value in params.items()])
+                               for key, value in params.items()])
 
         _TYPE_IDS = "ids"
         _TYPE_FLOAT = "float_vectors"
         _TYPE_BIN = "bin_vectors"
+
         def extract_vectors(vectors, request_op, is_left):
             prefix = "vectors_right"
             if is_left:
@@ -812,7 +814,7 @@ class Prepare:
                 if (not isinstance(ids, list)) or len(ids) == 0:
                     raise ParamError("Vector id array is empty or not a list")
 
-                calc_type  = _TYPE_IDS
+                calc_type = _TYPE_IDS
                 if isinstance(ids[0], str):
                     request_op.id_array.id_array.str_id.data.extend(ids)
                 else:

@@ -19,8 +19,6 @@ from .prepare import Prepare
 from .types import Status, IndexState, DataType, DeployMode, ErrorCode
 from .check import is_legal_host, is_legal_port
 from .utils import len_of
-from .hooks import BaseSearchHook
-from .client_hooks import SearchHook, HybridSearchHook
 from ..settings import DefaultConfig as config
 from .configs import DefaultConfigs
 
@@ -247,11 +245,6 @@ class GrpcHandler:
         self._condition = threading.Condition()
         self._request_id = 0
 
-        # client hook
-        self._search_hook = SearchHook()
-        self._hybrid_search_hook = HybridSearchHook()
-        self._search_file_hook = SearchHook()
-
         # set server uri if object is initialized with parameter
         _uri = kwargs.get("uri", None)
         _channel = kwargs.get("channel", None)
@@ -298,32 +291,6 @@ class GrpcHandler:
             _id = self._request_id
             self._request_id += 1
             return _id
-
-    def set_hook(self, **kwargs):
-        """
-        specify client hooks.
-        The client hooks are used in methods which interact with server.
-        Use key-value method to set hooks. Supported hook setting currently is as follow.
-
-            search hook,
-            search-in-file hook
-
-        """
-
-        # config search hook
-        _search_hook = kwargs.get('search', None)
-        if _search_hook:
-            if not isinstance(_search_hook, BaseSearchHook):
-                raise ParamError("search hook must be a subclass of `BaseSearchHook`")
-
-            self._search_hook = _search_hook
-
-        _search_file_hook = kwargs.get('search_in_file', None)
-        if _search_file_hook:
-            if not isinstance(_search_file_hook, BaseSearchHook):
-                raise ParamError("search hook must be a subclass of `BaseSearchHook`")
-
-            self._search_file_hook = _search_file_hook
 
     def ping(self):
         begin_timeout = 1
@@ -510,10 +477,7 @@ class GrpcHandler:
         collection_schema = self.describe_collection(collection_name, timeout=timeout, **kwargs)
 
         fields_name = list()
-        for i in range(len(entities)):
-            if "name" in entities[i]:
-                fields_name.append(entities[i]["name"])
-
+        fields_name = [entities[i]["name"] for i in range(len(entities)) if "name" in entities[i]]
         fields_info = collection_schema["fields"]
 
         request = insert_param if insert_param \
@@ -554,10 +518,12 @@ class GrpcHandler:
         except Exception as err:
             if kwargs.get("_async", False):
                 return MutationFuture(None, None, err)
-            raise err
+        finally:
+            # once delete api is finished, remove this error
+            raise NotImplementedError("Delete function is not implemented")
 
     def _prepare_search_request(self, collection_name, query_entities, partition_names=None, fields=None, timeout=None,
-                                **kwargs):
+                                round_decimal=-1, **kwargs):
         rf = self._stub.HasCollection.future(Prepare.has_collection_request(collection_name), wait_for_ready=True,
                                              timeout=timeout)
         reply = rf.result()
@@ -566,13 +532,13 @@ class GrpcHandler:
 
         collection_schema = self.describe_collection(collection_name, timeout)
         auto_id = collection_schema["auto_id"]
-        request = Prepare.search_request(collection_name, query_entities, partition_names, fields,
+        request = Prepare.search_request(collection_name, query_entities, partition_names, fields, round_decimal,
                                          schema=collection_schema)
 
         return request, auto_id
 
-    def _divide_search_request(self, collection_name, query_entities, partition_names=None, fields=None, timeout=None,
-                               **kwargs):
+    def _divide_search_request(self, collection_name, query_entities, partition_names=None, fields=None, timeout=None
+                               , round_decimal=-1, **kwargs):
         rf = self._stub.HasCollection.future(Prepare.has_collection_request(collection_name), wait_for_ready=True,
                                              timeout=timeout)
         reply = rf.result()
@@ -581,7 +547,7 @@ class GrpcHandler:
 
         collection_schema = self.describe_collection(collection_name, timeout)
         auto_id = collection_schema["auto_id"]
-        requests = Prepare.divide_search_request(collection_name, query_entities, partition_names, fields,
+        requests = Prepare.divide_search_request(collection_name, query_entities, partition_names, fields, round_decimal,
                                                  schema=collection_schema)
 
         return requests, auto_id
@@ -596,7 +562,6 @@ class GrpcHandler:
 
             # step 1: get future object
             for request in requests:
-                self._search_hook.pre_search()
 
                 ft = self._stub.Search.future(request, wait_for_ready=True, timeout=timeout)
                 futures.append(ft)
@@ -613,46 +578,45 @@ class GrpcHandler:
                     raise BaseException(response.status.error_code, response.status.reason)
 
                 raws.append(response)
-
-            return ChunkedQueryResult(raws, auto_id)
+            round_decimal = kwargs.get("round_decimal", -1)
+            return ChunkedQueryResult(raws, auto_id, round_decimal)
 
         except Exception as pre_err:
             if kwargs.get("_async", False):
                 return SearchFuture(None, None, True, pre_err)
             raise pre_err
 
-    def _batch_search(self, collection_name, query_entities, partition_names=None, fields=None, timeout=None, **kwargs):
+    def _batch_search(self, collection_name, query_entities, partition_names=None, fields=None, timeout=None,
+                      round_decimal=-1, **kwargs):
         requests, auto_id = self._divide_search_request(collection_name, query_entities, partition_names,
-                                                        fields, **kwargs)
+                                                        fields, timeout, round_decimal, **kwargs)
         kwargs["auto_id"] = auto_id
+        kwargs["round_decimal"] = round_decimal
         return self._execute_search_requests(requests, timeout, **kwargs)
 
     @error_handler(None)
-    def _total_search(self, collection_name, query_entities, partition_names=None, fields=None, timeout=None, **kwargs):
+    def _total_search(self, collection_name, query_entities, partition_names=None, fields=None, timeout=None,
+                      round_decimal=-1, **kwargs):
         request, auto_id = self._prepare_search_request(collection_name, query_entities, partition_names,
-                                                        fields, timeout, **kwargs)
+                                                        fields, timeout, round_decimal, **kwargs)
         kwargs["auto_id"] = auto_id
+        kwargs["round_decimal"] = round_decimal
         return self._execute_search_requests([request], timeout, **kwargs)
 
     @error_handler(None)
-    def search(self, collection_name, query_entities, partition_names=None, fields=None, timeout=None, **kwargs):
-        if kwargs.get("_deploy_mode", DeployMode.Distributed) == DeployMode.StandAlone:
-            return self._total_search(collection_name, query_entities, partition_names, fields, timeout, **kwargs)
-        return self._batch_search(collection_name, query_entities, partition_names, fields, timeout, **kwargs)
-
-    @error_handler(None)
     @check_has_collection
-    def search_with_expression(self, collection_name, data, anns_field, param, limit, expression=None,
-                               partition_names=None,
-                               output_fields=None, timeout=None, **kwargs):
+    def search(self, collection_name, data, anns_field, param, limit,
+                               expression=None, partition_names=None, output_fields=None,
+                               timeout=None, round_decimal=-1, **kwargs):
         _kwargs = copy.deepcopy(kwargs)
         collection_schema = self.describe_collection(collection_name, timeout)
         auto_id = collection_schema["auto_id"]
         _kwargs["schema"] = collection_schema
         requests = Prepare.search_requests_with_expr(collection_name, data, anns_field, param, limit, expression,
-                                                     partition_names, output_fields, **_kwargs)
+                                                     partition_names, output_fields, round_decimal, **_kwargs)
         _kwargs.pop("schema")
         _kwargs["auto_id"] = auto_id
+        _kwargs["round_decimal"] = round_decimal
         return self._execute_search_requests(requests, timeout, **_kwargs)
 
     @error_handler(None)

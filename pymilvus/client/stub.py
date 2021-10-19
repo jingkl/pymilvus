@@ -10,7 +10,8 @@ from urllib.parse import urlparse
 
 from . import __version__
 from .types import Status, DataType, DeployMode
-from .check import check_pass_param, is_legal_host, is_legal_port, is_legal_index_metric_type, is_legal_binary_index_metric_type
+from .check import check_pass_param, is_legal_host, is_legal_port, is_legal_index_metric_type, \
+    is_legal_binary_index_metric_type
 from .pool import ConnectionPool, SingleConnectionPool, SingletonThreadPool
 from .exceptions import BaseException, ParamError, DeprecatedError
 
@@ -120,18 +121,14 @@ class Milvus:
         self._pool_kwargs = _pool_args(handler=handler, **kwargs)
         self._update_connection_pool(channel=channel)
 
-        self._hooks = collections.defaultdict()
-
         self._deploy_mode = DeployMode.Distributed
 
-    def _wait_for_healthy(self, timeout=30, retry=10):
-        _timeout_on_every_retry = self._kw.get("timeout", None)
+    def _wait_for_healthy(self, timeout=60):
+        _timeout_on_every_retry = self._kw.get("timeout", 0)
         _timeout = _timeout_on_every_retry if _timeout_on_every_retry else timeout
         with self._connection() as handler:
             start_time = time.time()
-            while retry > 0:
-                if (time.time() - start_time > _timeout):
-                    break
+            while (time.time() - start_time < _timeout):
                 try:
                     status = handler.fake_register_link(_timeout)
                     if status.error_code == 0:
@@ -141,7 +138,6 @@ class Milvus:
                     pass
                 finally:
                     time.sleep(1)
-                    retry -= 1
             raise Exception("server is not healthy, please try again later")
 
     def __enter__(self):
@@ -943,7 +939,7 @@ class Milvus:
         :param collection_name: Name of the collection to delete entities from
         :type  collection_name: str
 
-        :param expr: The query expression
+        :param expr: The expression to specify entities to be deleted
         :type  expr: str
 
         :param partition_name: Name of partitions that contain entities
@@ -961,11 +957,9 @@ class Milvus:
             ParamError: If parameters are invalid
             BaseException: If the return result from server is not ok
         """
-        raise NotImplementedError("Delete function is not implemented")
-        #check_pass_param(collection_name=collection_name)
-        #print(collection_name, expr, partition_name)
-        #with self._connection() as handler:
-        #    return handler.delete(collection_name, expr, partition_name, timeout, **kwargs)
+        check_pass_param(collection_name=collection_name)
+        with self._connection() as handler:
+           return handler.delete(collection_name, expr, partition_name, timeout, **kwargs)
 
     @retry_on_rpc_failure(retry_times=10, wait=1)
     def flush(self, collection_names=None, timeout=None, **kwargs):
@@ -1016,101 +1010,8 @@ class Milvus:
             return handler.flush(collection_names, timeout, **kwargs)
 
     @retry_on_rpc_failure(retry_times=10, wait=1)
-    def search(self, collection_name, dsl, partition_names=None, fields=None, timeout=None, **kwargs):
-        """
-        Searches a collection based on the given DSL clauses and returns query results.
-
-        :param collection_name: The name of the collection to search.
-        :type  collection_name: str
-
-        :param dsl: The DSL that defines the query.
-        :type  dsl: dict
-
-            ` {
-                "bool": {
-                    "must": [
-                        {
-                            "range": {
-                                "A": {
-                                    "GT": 1,
-                                    "LT": "100"
-                                }
-                            }
-                        },
-                        {
-                            "vector": {
-                                "Vec": {
-                                    "metric_type": "L2",
-                                    "params": {
-                                        "nprobe": 10
-                                    },
-                                    "query": vectors,
-                                    "topk": 10
-                                }
-                            }
-                        }
-                    ]
-                }
-            }`
-
-        :param partition_names: The tags of partitions to search.
-        :type  partition_names: list[str]
-
-        :param fields: The fields to return in the search result
-        :type  fields: list[str]
-
-        :param timeout: An optional duration of time in seconds to allow for the RPC. When timeout
-                        is set to None, client waits until server response or error occur.
-        :type  timeout: float
-
-        :param kwargs:
-            * *_async* (``bool``) --
-              Indicate if invoke asynchronously. When value is true, method returns a SearchFuture object;
-              otherwise, method returns results from server.
-            * *_callback* (``function``) --
-              The callback function which is invoked after server response successfully. It only take
-              effect when _async is set to True.
-
-        :return: Query result. QueryResult is iterable and is a 2d-array-like class, the first dimension is
-                 the number of vectors to query (nq), the second dimension is the number of topk.
-        :rtype: QueryResult
-
-        Suppose the nq in dsl is 4, topk in dsl is 10:
-        :example:
-        >>> client = Milvus(host='localhost', port='19530')
-        >>> result = client.search(collection_name, dsl)
-        >>> print(len(result))
-        4
-        >>> print(len(result[0]))
-        10
-        >>> print(len(result[0].ids))
-        10
-        >>> result[0].ids
-        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        >>> len(result[0].distances)
-        10
-        >>> result[0].distances
-        [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-        >>> top1 = result[0][0]
-        >>> top1.id
-        0
-        >>> top1.distance
-        0.1
-        >>> top1.score # now, the score is equal to distance
-        0.1
-
-        :raises:
-            RpcError: If gRPC encounter an error
-            ParamError: If parameters are invalid
-            BaseException: If the return result from server is not ok
-        """
-        with self._connection() as handler:
-            kwargs["_deploy_mode"] = self._deploy_mode
-            return handler.search(collection_name, dsl, partition_names, fields, timeout=timeout, **kwargs)
-
-    @retry_on_rpc_failure(retry_times=10, wait=1)
-    def search_with_expression(self, collection_name, data, anns_field, param, limit, expression=None, partition_names=None,
-                               output_fields=None, timeout=None, **kwargs):
+    def search(self, collection_name, data, anns_field, param, limit, expression=None, partition_names=None,
+               output_fields=None, timeout=None, round_decimal=-1, **kwargs):
         """
         Searches a collection based on the given expression and returns query results.
 
@@ -1134,6 +1035,8 @@ class Milvus:
         :param timeout: An optional duration of time in seconds to allow for the RPC. When timeout
                         is set to None, client waits until server response or error occur.
         :type  timeout: float
+        :param round_decimal: The specified number of decimal places of returned distance
+        :type  round_decimal: int
         :param kwargs:
             * *_async* (``bool``) --
               Indicate if invoke asynchronously. When value is true, method returns a SearchFuture object;
@@ -1141,6 +1044,9 @@ class Milvus:
             * *_callback* (``function``) --
               The callback function which is invoked after server response successfully. It only take
               effect when _async is set to True.
+            * *guarantee_timestamp* (``int``) --
+              This function instructs Milvus to see all operations performed before a provided timestamp. If no
+              such timestamp is provided, then Milvus will search all operations performed to date.
 
         :return: Query result. QueryResult is iterable and is a 2d-array-like class, the first dimension is
                  the number of vectors to query (nq), the second dimension is the number of limit(topk).
@@ -1153,6 +1059,7 @@ class Milvus:
         """
         check_pass_param(
             limit=limit,
+            round_decimal=round_decimal,
             anns_field=anns_field,
             search_data=data,
             partition_name_array=partition_names,
@@ -1160,7 +1067,8 @@ class Milvus:
         )
         with self._connection() as handler:
             kwargs["_deploy_mode"] = self._deploy_mode
-            return handler.search_with_expression(collection_name, data, anns_field, param, limit, expression, partition_names, output_fields, timeout, **kwargs)
+            return handler.search(collection_name, data, anns_field, param, limit, expression,
+                                  partition_names, output_fields, timeout, round_decimal, **kwargs)
 
     @retry_on_rpc_failure(retry_times=10, wait=1)
     def calc_distance(self, vectors_left, vectors_right, params=None, timeout=None, **kwargs):

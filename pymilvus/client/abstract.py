@@ -25,9 +25,7 @@ class LoopBase(object):
             _end = min(item.stop, self.__len__()) if item.stop else self.__len__()
             _step = item.step or 1
 
-            elements = []
-            for i in range(_start, _end, _step):
-                elements.append(self.get__item(i))
+            elements = [self.get__item(i) for i in range(_start, _end, _step)]
             return elements
 
         if item >= self.__len__():
@@ -43,6 +41,9 @@ class LoopBase(object):
         # iterate stop, raise Exception
         self.__index = 0
         raise StopIteration()
+
+    def __str__(self):
+        return str(list(map(str, self.__getitem__(slice(0, 10)))))
 
     @abc.abstractmethod
     def get__item(self, item):
@@ -143,8 +144,7 @@ class CollectionSchema:
         #     self.params.update(par)
         #     # self.params[kv.key] = kv.value
 
-        for f in raw.schema.fields:
-            self.fields.append(FieldSchema(f))
+        self.fields = [FieldSchema(f) for f in raw.schema.fields]
 
         # for s in raw.statistics:
         #     self.statistics[s.key] = s.value
@@ -187,9 +187,7 @@ class Entity:
 
     @property
     def fields(self):
-        fields = []
-        for k, v in self._row_data.items():
-            fields.append(k)
+        fields = [k for k, v in self._row_data.items()]
         return fields
 
     def get(self, field):
@@ -233,11 +231,14 @@ class Hit:
 
 
 class Hits(LoopBase):
-    def __init__(self, raw, auto_id):
+    def __init__(self, raw, auto_id, round_decimal=-1):
         super().__init__()
         self._raw = raw
         self._auto_id = auto_id
-        self._distances = self._raw.scores
+        if round_decimal != -1:
+            self._distances = [round(x, round_decimal) for x in self._raw.scores]
+        else:
+            self._distances = self._raw.scores
         self._entities = []
         self._pack(self._raw)
 
@@ -285,7 +286,7 @@ class Hits(LoopBase):
                         end_pos = (item + 1) * (dim / 8)
                         entity_row_data[field_data.field_name] = [
                             field_data.vectors.binary_vector.data[start_pos:end_pos]]
-        entity_score = self._raw.scores[item]
+        entity_score = self._distances[item]
         return Hit(entity_id, entity_row_data, entity_score)
 
     @property
@@ -294,7 +295,7 @@ class Hits(LoopBase):
 
     @property
     def distances(self):
-        return self._raw.scores
+        return self._distances
 
 
 class MutationResult:
@@ -409,11 +410,12 @@ class QueryResult(LoopBase):
 
 
 class ChunkedQueryResult(LoopBase):
-    def __init__(self, raw_list, auto_id=True):
+    def __init__(self, raw_list, auto_id=True, round_decimal=-1):
         super().__init__()
         self._raw_list = raw_list
         self._auto_id = auto_id
         self._nq = 0
+        self.round_decimal = round_decimal
 
         self._pack(self._raw_list)
 
@@ -469,7 +471,7 @@ class ChunkedQueryResult(LoopBase):
                 offset += raw.results.topks[i]
 
     def get__item(self, item):
-        return Hits(self._hits[item], self._auto_id)
+        return Hits(self._hits[item], self._auto_id, self.round_decimal)
 
 
 def _abstract():

@@ -533,7 +533,7 @@ class Collection:
         Delete entities with an expression condition.
         And return results to show which primary key is deleted successfully
 
-        :param expr: The query expression
+        :param expr: The expression to specify entities to be deleted
         :type  expr: str
 
         :param partition_name: Name of partitions that contain entities
@@ -585,7 +585,7 @@ class Collection:
         return MutationResult(res)
 
     def search(self, data, anns_field, param, limit, expr=None, partition_names=None,
-               output_fields=None, timeout=None, **kwargs):
+               output_fields=None, timeout=None, round_decimal=-1, **kwargs):
         """
         Conducts a vector similarity search with an optional boolean expression as filter.
 
@@ -607,6 +607,8 @@ class Collection:
         :param timeout: An optional duration of time in seconds to allow for the RPC. When timeout
                         is set to None, client waits until server response or error occur.
         :type  timeout: float
+        :param round_decimal: The specified number of decimal places of returned distance
+        :type  round_decimal: int
         :param kwargs:
             * *_async* (``bool``) --
               Indicate if invoke asynchronously. When value is true, method returns a
@@ -614,6 +616,9 @@ class Collection:
             * *_callback* (``function``) --
               The callback function which is invoked after server response successfully.
               It functions only if _async is set to True.
+            * *guarantee_timestamp* (``int``) --
+              This function instructs Milvus to see all operations performed before a provided timestamp. If no
+              such timestamp is provided, then Milvus will search all operations performed to date.
 
         :return: SearchResult:
             SearchResult is iterable and is a 2d-array-like class, the first dimension is
@@ -665,8 +670,8 @@ class Collection:
             raise DataTypeNotMatchException(0, ExceptionsMessage.ExprType % type(expr))
 
         conn = self._get_connection()
-        res = conn.search_with_expression(self._name, data, anns_field, param, limit, expr,
-                                          partition_names, output_fields, timeout, **kwargs)
+        res = conn.search(self._name, data, anns_field, param, limit, expr,
+                          partition_names, output_fields, timeout, round_decimal, **kwargs)
         if kwargs.get("_async", False):
             return SearchFuture(res)
         return SearchResult(res)
